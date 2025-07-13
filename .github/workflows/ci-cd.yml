@@ -137,14 +137,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Fetch all history so we can diff against the base commit
           fetch-depth: 0
 
       - name: Get list of changed files
         id: changed_files
         uses: tj-actions/changed-files@v44
         with:
-          # We only want to scan relevant source code files
           files: |
             backend1/**
             backend2/**
@@ -162,7 +160,8 @@ jobs:
 
       - name: Setup Node.js
         if: steps.changed_files.outputs.any_changed == 'true'
-        uses: actions/setup-node@v5
+        # FIX: Changed v5 to the correct version v4
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
