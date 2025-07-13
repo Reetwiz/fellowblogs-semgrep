@@ -18,7 +18,6 @@ permissions:
   packages: write
   pages: write
   id-token: write
-  # Permissions required for Semgrep action to upload results to the Security tab
   security-events: write
   actions: read
 
@@ -139,42 +138,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Fetch all history so Semgrep can diff against the base branch
           fetch-depth: 0
 
       - name: Run Semgrep differential scan
         uses: returntocorp/semgrep-action@v1
         with:
-          # This generates a SARIF file named `semgrep.sarif` by default
-          # The action automatically handles uploading it to the GitHub Security tab
           publishToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Python script for SARIF to HTML conversion
         run: |
+          # FIX: All CSS curly braces are now escaped with double braces (e.g., {{ ... }})
+          # so Python's .format() method will ignore them.
           cat <<'EOF' > parse_sarif.py
           import json
           import html
 
-          # Basic CSS for a clean look
           HTML_TEMPLATE = """
           <!DOCTYPE html>
           <html>
           <head>
           <title>Semgrep Scan Report</title>
           <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; line-height: 1.6; color: #24292e; background-color: #fff; padding: 2em; }
-            .container { max-width: 900px; margin: 0 auto; }
-            .finding { border: 1px solid #e1e4e8; border-radius: 6px; margin-bottom: 2em; }
-            .header { background-color: #f6f8fa; padding: 0.8em 1.2em; border-bottom: 1px solid #e1e4e8; }
-            .header h2 { margin: 0; font-size: 1.2em; }
-            .content { padding: 1.2em; }
-            .message { font-weight: bold; }
-            .location { color: #586069; font-family: monospace, monospace; }
-            .rule-id { float: right; color: #586069; }
-            .severity-HIGH { border-left: 5px solid #d73a49; }
-            .severity-MEDIUM { border-left: 5px solid #dbab09; }
-            .severity-LOW { border-left: 5px solid #0366d6; }
-            .severity-INFO { border-left: 5px solid #6a737d; }
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; line-height: 1.6; color: #24292e; background-color: #fff; padding: 2em; }}
+            .container {{ max-width: 900px; margin: 0 auto; }}
+            .finding {{ border: 1px solid #e1e4e8; border-radius: 6px; margin-bottom: 2em; }}
+            .header {{ background-color: #f6f8fa; padding: 0.8em 1.2em; border-bottom: 1px solid #e1e4e8; }}
+            .header h2 {{ margin: 0; font-size: 1.2em; }}
+            .content {{ padding: 1.2em; }}
+            .location {{ color: #586069; font-family: monospace, monospace; }}
+            .rule-id {{ float: right; color: #586069; }}
+            .severity-HIGH {{ border-left: 5px solid #d73a49; }}
+            .severity-MEDIUM {{ border-left: 5px solid #dbab09; }}
+            .severity-LOW {{ border-left: 5px solid #0366d6; }}
+            .severity-INFO {{ border-left: 5px solid #6a737d; }}
           </style>
           </head>
           <body>
@@ -199,43 +195,42 @@ jobs:
           """
 
           def to_html(sarif_file, html_file):
+              findings_html = ""
               try:
                   with open(sarif_file, 'r') as f:
                       sarif_data = json.load(f)
-              except FileNotFoundError:
-                  print(f"SARIF file not found at {sarif_file}. Generating empty report.")
-                  sarif_data = {"runs": []}
-              except json.JSONDecodeError:
-                  print("Error decoding SARIF file. Generating empty report.")
-                  sarif_data = {"runs": []}
-              
-              findings_html = ""
-              if sarif_data["runs"]:
-                  results = sarif_data["runs"][0]["results"]
-                  rules = sarif_data["runs"][0]["tool"]["driver"]["rules"]
-                  rule_meta = {rule['id']: rule for rule in rules}
+              except (FileNotFoundError, json.JSONDecodeError):
+                  # If file not found or empty/invalid, generate a message.
+                  findings_html = "<p>No findings in this scan. The SARIF file was either not generated or was empty.</p>"
+              else:
+                  if sarif_data.get("runs") and sarif_data["runs"][0].get("results"):
+                      results = sarif_data["runs"][0]["results"]
+                      rules = sarif_data["runs"][0]["tool"]["driver"]["rules"]
+                      rule_meta = {{rule['id']: rule for rule in rules}}
 
-                  if not results:
-                      findings_html = "<p>No findings in this scan.</p>"
+                      if not results:
+                          findings_html = "<p>No findings in this scan.</p>"
+                      else:
+                          for result in results:
+                              rule_id = result["ruleId"]
+                              message = result["message"]["text"]
+                              location_data = result["locations"][0]["physicalLocation"]
+                              file_path = location_data["artifactLocation"]["uri"]
+                              line = location_data["region"]["startLine"]
+                              
+                              severity = rule_meta.get(rule_id, {{}}).get('properties', {{}}).get('security-severity', 'INFO').upper()
+
+                              findings_html += FINDING_TEMPLATE.format(
+                                  rule_id=html.escape(rule_id),
+                                  message=html.escape(message),
+                                  location=f"{{html.escape(file_path)}}:{{line}}",
+                                  severity=html.escape(severity)
+                              )
                   else:
-                      for result in results:
-                          rule_id = result["ruleId"]
-                          message = result["message"]["text"]
-                          location_data = result["locations"][0]["physicalLocation"]
-                          file_path = location_data["artifactLocation"]["uri"]
-                          line = location_data["region"]["startLine"]
-                          
-                          # Get severity from rule properties
-                          severity = rule_meta.get(rule_id, {}).get('properties', {}).get('security-severity', 'INFO').upper()
-
-                          findings_html += FINDING_TEMPLATE.format(
-                              rule_id=html.escape(rule_id),
-                              message=html.escape(message),
-                              location=f"{html.escape(file_path)}:{line}",
-                              severity=html.escape(severity)
-                          )
+                      findings_html = "<p>SARIF file was present but contained no results.</p>"
               
               with open(html_file, 'w') as f:
+                  # This is the only placeholder now, so the KeyError is impossible.
                   f.write(HTML_TEMPLATE.format(findings=findings_html))
 
           if __name__ == "__main__":
@@ -243,7 +238,7 @@ jobs:
           EOF
 
       - name: Generate HTML report from SARIF
-        if: always() # Run even if the semgrep action fails (e.g., finds issues)
+        if: always()
         run: python parse_sarif.py
 
       - name: Upload HTML Report as Artifact
