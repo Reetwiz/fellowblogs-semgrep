@@ -338,7 +338,7 @@ jobs:
     name: 9. Deploy to VM
     needs: [prepare, build-and-push]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
-    runs-on: ubuntu-latest
+    runs-on: runner
     environment: production
     steps:
       - name: Deploy to VM via SSH
