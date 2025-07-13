@@ -177,17 +177,13 @@ jobs:
         with:
           fetch-depth: 0
       - name: Run Semgrep and Generate SARIF Report
-        # This command runs Semgrep and outputs a standard SARIF file.
-        # The `|| true` is critical: it ensures the step succeeds even if Semgrep finds issues and exits with code 1.
-        # This allows the subsequent steps to run and generate the HTML report.
+        # The `|| true` is critical: it ensures this step succeeds even if Semgrep finds issues (and exits with code 1).
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep:latest \
             semgrep ci --config=auto --sarif -o /src/semgrep.sarif || true
-      - name: Install SARIF to HTML Converter
-        run: npm install -g @microsoft/sarif-web-component
-      - name: Convert SARIF to HTML
-        # This converts the SARIF file from the previous step into an interactive HTML report.
-        run: sarif-to-html semgrep.sarif -o semgrep-report.html
+      - name: Generate HTML Report from SARIF
+        # This uses npx to run the converter without a global install, which is more reliable in CI.
+        run: npx @microsoft/sarif-web-component@3.1.2 semgrep.sarif -o semgrep-report.html
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
