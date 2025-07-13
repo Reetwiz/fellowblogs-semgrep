@@ -1,3 +1,10 @@
+## [3.0.4](https://github.com/Reetwiz/fellowblogs-semgrep/compare/v3.0.3...v3.0.4) (2025-07-13)
+
+
+### Bug Fixes
+
+* diff aware semgrep ([cfa7944](https://github.com/Reetwiz/fellowblogs-semgrep/commit/cfa7944dec6a2588c9fc3891b20a709ee38a729d))
+
 ## [3.0.3](https://github.com/Reetwiz/fellowblogs-semgrep/compare/v3.0.2...v3.0.3) (2025-07-13)
 
 
