@@ -1,3 +1,5 @@
+# FILE: .github/workflows/your-workflow-name.yml
+
 name: CI/CD Pipeline
 
 on:
@@ -18,8 +20,6 @@ permissions:
   packages: write
   pages: write
   id-token: write
-  security-events: write
-  actions: read # Required for uploading SARIF results
 
 jobs:
   changes:
@@ -91,7 +91,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}
+          images: ${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-semgrep-${{ matrix.service }}
           tags: |
             type=raw,value=dev,enable=${{ github.ref_name == 'dev' }}
             type=sha,prefix=dev-,format=short,enable=${{ github.ref_name == 'dev' }}
@@ -107,8 +107,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=/tmp/.buildx-cache-${{ matrix.service }}
+          cache-to: type=local,mode=max,dest=/tmp/.buildx-cache-${{ matrix.service }}
           build-args: |
             ${{ matrix.service == 'frontend' && format('VITE_CLERK_PUBLISHABLE_KEY={0}', secrets.VITE_CLERK_PUBLISHABLE_KEY) || '' }}
             ${{ matrix.service == 'frontend' && format('VITE_BACKEND1_BASE_URL={0}', vars.VITE_BACKEND1_BASE_URL) || '' }}
@@ -116,7 +116,7 @@ jobs:
       - name: Re-tag and push existing image (if not changed on main)
         if: github.ref_name == 'main' && needs.changes.outputs[matrix.service] == 'false'
         run: |
-          PROD_IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}"
+          PROD_IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-semgrep-${{ matrix.service }}"
           docker pull $PROD_IMAGE_NAME:latest
           echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n' | while read tag; do
             docker tag $PROD_IMAGE_NAME:latest "$tag"
@@ -129,150 +129,69 @@ jobs:
           name: build-artifact-${{ matrix.service }}
           path: ${{ matrix.context }}
 
-  sast-semgrep:
-    name: 4. SAST Scan (Semgrep on Changed Files)
+  upload-compose-artifact:
+    name: 4. Upload Compose Artifact for Release
+    needs: prepare
+    if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-compose-file
+          path: docker-compose.yml
+
+  export-images:
+    name: 5. Export Docker Images for Release
+    needs: [prepare, build-and-push]
+    if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [backend1, backend2, frontend]
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - name: Pull and Export Image
+        run: |
+          IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-semgrep-${{ matrix.service }}"
+          IMAGE_TAG="${{ needs.prepare.outputs.tag }}"
+          docker pull $IMAGE_NAME:$IMAGE_TAG
+          docker save -o image-${{ matrix.service }}.tar $IMAGE_NAME:$IMAGE_TAG
+      - name: Upload Image Export as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-export-${{ matrix.service }}
+          path: image-${{ matrix.service }}.tar
+
+  scan-code-semgrep:
+    name: 6. Scan Code with Semgrep
     needs: changes
     if: needs.changes.outputs.any_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          # Fetch all history so Semgrep can diff against the base branch
+          # Fetches the entire history, required for Semgrep's diff-aware scanning.
           fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Run Semgrep CI
+        uses: semgrep/semgrep-action@v2
         with:
-          python-version: '3.x'
-
-      - name: Install Semgrep
-        run: pip install semgrep
-
-      - name: Determine baseline for diff scan
-        id: git
-        run: |
-          # For PRs, compare to the base branch. For pushes to main/dev, compare to the previous commit.
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "BASELINE=origin/${{ github.base_ref }}" >> $GITHUB_ENV
-          else
-            echo "BASELINE=HEAD^1" >> $GITHUB_ENV
-          fi
-          echo "Determined baseline for diff-scan: $BASELINE"
-
-      - name: Run Semgrep differential scan
-        run: |
-          # Scans files changed compared to the baseline, outputting to SARIF
-          # Use || true to prevent the job from failing if findings are found, allowing reports to be generated.
-          semgrep scan --config "p/ci" --sarif -o semgrep.sarif --compare-to ${{ env.BASELINE }} || true
-
-      - name: Upload SARIF to GitHub Security Tab
-        if: always() # Run even if the scan found issues
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-
-      - name: Create Python script for SARIF to HTML conversion
-        run: |
-          cat <<'EOF' > parse_sarif.py
-          import json
-          import html
-
-          HTML_TEMPLATE = """
-          <!DOCTYPE html>
-          <html>
-          <head>
-          <title>Semgrep Scan Report</title>
-          <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"; line-height: 1.6; color: #24292e; background-color: #fff; padding: 2em; }}
-            .container {{ max-width: 900px; margin: 0 auto; }}
-            .finding {{ border: 1px solid #e1e4e8; border-radius: 6px; margin-bottom: 2em; }}
-            .header {{ background-color: #f6f8fa; padding: 0.8em 1.2em; border-bottom: 1px solid #e1e4e8; }}
-            .header h2 {{ margin: 0; font-size: 1.2em; }}
-            .content {{ padding: 1.2em; }}
-            .location {{ color: #586069; font-family: monospace, monospace; }}
-            .rule-id {{ float: right; color: #586069; }}
-            .severity-HIGH {{ border-left: 5px solid #d73a49; }}
-            .severity-MEDIUM {{ border-left: 5px solid #dbab09; }}
-            .severity-LOW {{ border-left: 5px solid #0366d6; }}
-            .severity-INFO {{ border-left: 5px solid #6a737d; }}
-          </style>
-          </head>
-          <body>
-          <div class="container">
-            <h1>Semgrep Scan Report</h1>
-            {findings}
-          </div>
-          </body>
-          </html>
-          """
-
-          FINDING_TEMPLATE = """
-          <div class="finding severity-{severity}">
-            <div class="header">
-              <span class="rule-id">{rule_id}</span>
-              <h2>{message}</h2>
-            </div>
-            <div class="content">
-              <p class="location">{location}</p>
-            </div>
-          </div>
-          """
-
-          def to_html(sarif_file, html_file):
-              findings_html = ""
-              try:
-                  with open(sarif_file, 'r') as f:
-                      sarif_data = json.load(f)
-              except (FileNotFoundError, json.JSONDecodeError):
-                  findings_html = "<p>No findings in this scan. The SARIF file was either not generated or was empty.</p>"
-              else:
-                  if sarif_data.get("runs") and sarif_data["runs"][0].get("results"):
-                      results = sarif_data["runs"][0]["results"]
-                      rules = sarif_data["runs"][0]["tool"]["driver"]["rules"]
-                      rule_meta = {{rule['id']: rule for rule in rules}}
-
-                      if not results:
-                          findings_html = "<p>No findings in this scan.</p>"
-                      else:
-                          for result in results:
-                              rule_id = result["ruleId"]
-                              message = result["message"]["text"]
-                              location_data = result["locations"][0]["physicalLocation"]
-                              file_path = location_data["artifactLocation"]["uri"]
-                              line = location_data["region"]["startLine"]
-                              
-                              severity = rule_meta.get(rule_id, {{}}).get('properties', {{}}).get('security-severity', 'INFO').upper()
-
-                              findings_html += FINDING_TEMPLATE.format(
-                                  rule_id=html.escape(rule_id),
-                                  message=html.escape(message),
-                                  location=f"{{html.escape(file_path)}}:{{line}}",
-                                  severity=html.escape(severity)
-                              )
-                  else:
-                      findings_html = "<p>SARIF file was present but contained no results.</p>"
-              
-              with open(html_file, 'w') as f:
-                  f.write(HTML_TEMPLATE.format(findings=findings_html))
-
-          if __name__ == "__main__":
-              to_html('semgrep.sarif', 'semgrep-report.html')
-          EOF
-
-      - name: Generate HTML report from SARIF
-        if: always()
-        run: python parse_sarif.py
-
-      - name: Upload HTML Report as Artifact
-        if: always()
+          # The action automatically performs a diff-aware scan on push events (comparing HEAD~1..HEAD)
+          # and generates an HTML report for publishing.
+          output_format: "html"
+          output_filename: "semgrep-report.html"
+      - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
-          name: semgrep-report-html
+          name: semgrep-report
           path: semgrep-report.html
 
-  scan-images:
-    name: 5. Scan Images for Release (Trivy)
+  scan-images-trivy:
+    name: 7. Scan Images with Trivy (for Release)
     needs: [prepare, build-and-push]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
@@ -283,7 +202,7 @@ jobs:
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@0.20.0
         with:
-          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}:${{ needs.prepare.outputs.tag }}
+          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-semgrep-${{ matrix.service }}:${{ needs.prepare.outputs.tag }}
           format: 'template'
           template: '@/contrib/html.tpl'
           output: 'trivy-report.html'
@@ -297,8 +216,8 @@ jobs:
           path: trivy-report.html
 
   deploy-to-pages:
-    name: 6. Deploy Site and Reports to GitHub Pages
-    needs: [changes, prepare, scan-images, sast-semgrep]
+    name: 8. Deploy Site and Reports to GitHub Pages
+    needs: [changes, prepare, scan-images-trivy, scan-code-semgrep]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
     environment:
@@ -315,7 +234,7 @@ jobs:
         run: |
           cd frontend
           yarn install --frozen-lockfile
-          VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }} VITE_BASE_URL=/${{ github.event.repository.name }}/ yarn build
+          VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }} VITE_BASE_URL=/fellowblogs-semgrep/ yarn build
       - name: Download all scan reports
         uses: actions/download-artifact@v4
         with:
@@ -326,22 +245,16 @@ jobs:
           if [ -d "frontend/dist" ]; then
             cp -r frontend/dist/* _site/
           fi
-          
-          SEMGREP_CONTENT="<h2>Semgrep SAST Scan Results</h2><p>No report available. The scan may have been skipped or an error occurred during report generation.</p>"
-          if [ -f "reports/semgrep-report-html/semgrep-report.html" ]; then
-            cp reports/semgrep-report-html/semgrep-report.html _site/scan/semgrep.html
-            SEMGREP_CONTENT="<h2>Semgrep SAST Scan Results</h2><iframe src='semgrep.html' style='width:100%; height:80vh; border:none;'></iframe>"
-          fi
-
-          CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html 2>/dev/null | sed '1d;$d' || echo "<p>Report not available.</p>")
-          CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html 2>/dev/null | sed '1d;$d' || echo "<p>Report not available.</p>")
-          CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html 2>/dev/null | sed '1d;$d' || echo "<p>Report not available.</p>")
+          CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
+          CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
+          CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
+          CONTENT_SEMGREP=$(awk '/<body/,/<\/body>/' reports/semgrep-report/semgrep-report.html | sed '1d;$d')
           
           cat <<EOF > _site/scan/index.html
           <!DOCTYPE html>
           <html>
           <head>
-          <title>Consolidated Security Scan Report</title>
+          <title>Consolidated Scan Report</title>
           <style>
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; margin: 2em; line-height: 1.5; background-color: #f6f8fa; }
             h1 { border-bottom: 2px solid #eaecef; padding-bottom: 0.3em; }
@@ -358,26 +271,28 @@ jobs:
           </style>
           </head>
           <body>
-          <h1>Consolidated Security Report for Release ${{ needs.prepare.outputs.tag }}</h1>
+          <h1>Consolidated Scan Report for Release ${{ needs.prepare.outputs.tag }}</h1>
           <div class="tab">
-            <button class="tablinks" onclick="openReport(event, 'Semgrep')" id="defaultOpen">Semgrep SAST</button>
-            <button class="tablinks" onclick="openReport(event, 'Backend1')">Trivy: Backend1</button>
-            <button class="tablinks" onclick="openReport(event, 'Backend2')">Trivy: Backend2</button>
-            <button class="tablinks" onclick="openReport(event, 'Frontend')">Trivy: Frontend</button>
+            <button class="tablinks" onclick="openReport(event, 'Semgrep')" id="defaultOpen">Semgrep</button>
+            <button class="tablinks" onclick="openReport(event, 'TrivyBackend1')">Trivy - Backend1</button>
+            <button class="tablinks" onclick="openReport(event, 'TrivyBackend2')">Trivy - Backend2</button>
+            <button class="tablinks" onclick="openReport(event, 'TrivyFrontend')">Trivy - Frontend</button>
           </div>
+
           <div id="Semgrep" class="tabcontent">
-            ${SEMGREP_CONTENT}
+            <h2>Semgrep Code Scan Results</h2>
+            ${CONTENT_SEMGREP}
           </div>
-          <div id="Backend1" class="tabcontent">
-            <h2>Trivy Scan Results: Backend1</h2>
+          <div id="TrivyBackend1" class="tabcontent">
+            <h2>Trivy Scan Results - Backend1</h2>
             ${CONTENT_B1}
           </div>
-          <div id="Backend2" class="tabcontent">
-            <h2>Trivy Scan Results: Backend2</h2>
+          <div id="TrivyBackend2" class="tabcontent">
+            <h2>Trivy Scan Results - Backend2</h2>
             ${CONTENT_B2}
           </div>
-          <div id="Frontend" class="tabcontent">
-            <h2>Trivy Scan Results: Frontend</h2>
+          <div id="TrivyFrontend" class="tabcontent">
+            <h2>Trivy Scan Results - Frontend</h2>
             ${CONTENT_FE}
           </div>
           <script>
@@ -405,44 +320,6 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-  
-  upload-compose-artifact:
-    name: 7. Upload Compose Artifact for Release
-    needs: prepare
-    if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/upload-artifact@v4
-        with:
-          name: docker-compose-file
-          path: docker-compose.yml
-
-  export-images:
-    name: 8. Export Docker Images for Release
-    needs: [prepare, build-and-push]
-    if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        service: [backend1, backend2, frontend]
-    steps:
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
-      - name: Pull and Export Image
-        run: |
-          IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}"
-          IMAGE_TAG="${{ needs.prepare.outputs.tag }}"
-          docker pull $IMAGE_NAME:$IMAGE_TAG
-          docker save -o image-${{ matrix.service }}.tar $IMAGE_NAME:$IMAGE_TAG
-      - name: Upload Image Export as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image-export-${{ matrix.service }}
-          path: image-${{ matrix.service }}.tar
 
   deploy-to-vm:
     name: 9. Deploy to VM
@@ -459,7 +336,7 @@ jobs:
           key: ${{ secrets.VM_SSH_PRIVATE_KEY }}
           script: |
             set -e
-            cd /home/reetwiz/fellowblogs
+            cd /home/reetwiz/fellowblogs-semgrep
             echo "--- Logging into Docker Hub ---"
             echo "${{ secrets.DOCKER_HUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
             echo "--- Shutting down existing services ---"
@@ -474,7 +351,7 @@ jobs:
 
   release:
     name: 10. Create GitHub Release
-    needs: [prepare, deploy-to-vm, export-images, upload-compose-artifact, scan-images, build-and-push]
+    needs: [prepare, deploy-to-vm, export-images, upload-compose-artifact, scan-images-trivy, scan-code-semgrep, build-and-push]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
     permissions:
@@ -491,13 +368,18 @@ jobs:
             zip -r "${dir}.zip" "$dir"
             rm -rf "$dir"
           done
-      - name: Rename reports for unique asset names
+      - name: Rename and move reports for unique asset names
         run: |
           cd release-artifacts
           for dir in trivy-report-*; do
             service_name=$(echo "$dir" | sed 's/trivy-report-//')
-            mv "${dir}/trivy-report.html" "${dir}/trivy-report-${service_name}.html"
+            mv "${dir}/trivy-report.html" "trivy-report-${service_name}.html"
+            rm -rf "$dir"
           done
+          if [ -d "semgrep-report" ]; then
+            mv semgrep-report/semgrep-report.html semgrep-report.html
+            rm -rf semgrep-report
+          fi
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v2
         with:
@@ -507,5 +389,6 @@ jobs:
           files: |
             release-artifacts/docker-compose-file/docker-compose.yml
             release-artifacts/build-artifact-*.zip
-            release-artifacts/trivy-report-*/*.html
+            release-artifacts/trivy-report-*.html
+            release-artifacts/semgrep-report.html
             release-artifacts/docker-image-export-*/*.tar
