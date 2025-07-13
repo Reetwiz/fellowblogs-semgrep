@@ -46,8 +46,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.any_changed == 'true'
     runs-on: ubuntu-latest
+    # --- CHANGE: Use the official Semgrep container as per the documentation ---
     container:
       image: semgrep/semgrep
+    # --- CHANGE: Define the environment variable for the container ---
     env:
       SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
     steps:
