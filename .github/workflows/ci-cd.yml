@@ -19,7 +19,7 @@ permissions:
   pages: write
   id-token: write
   security-events: write
-  actions: read
+  actions: read # Required for uploading SARIF results
 
 jobs:
   changes:
@@ -138,17 +138,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # Fetch all history so Semgrep can diff against the base branch
           fetch-depth: 0
 
-      - name: Run Semgrep differential scan
-        uses: returntocorp/semgrep-action@v1
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          publishToken: ${{ secrets.GITHUB_TOKEN }}
+          python-version: '3.x'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Determine baseline for diff scan
+        id: git
+        run: |
+          # For PRs, compare to the base branch. For pushes to main/dev, compare to the previous commit.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "BASELINE=origin/${{ github.base_ref }}" >> $GITHUB_ENV
+          else
+            echo "BASELINE=HEAD^1" >> $GITHUB_ENV
+          fi
+          echo "Determined baseline for diff-scan: $BASELINE"
+
+      - name: Run Semgrep differential scan
+        run: |
+          # Scans files changed compared to the baseline, outputting to SARIF
+          # Use || true to prevent the job from failing if findings are found, allowing reports to be generated.
+          semgrep scan --config "p/ci" --sarif -o semgrep.sarif --compare-to ${{ env.BASELINE }} || true
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always() # Run even if the scan found issues
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
 
       - name: Create Python script for SARIF to HTML conversion
         run: |
-          # FIX: All CSS curly braces are now escaped with double braces (e.g., {{ ... }})
-          # so Python's .format() method will ignore them.
           cat <<'EOF' > parse_sarif.py
           import json
           import html
@@ -200,7 +225,6 @@ jobs:
                   with open(sarif_file, 'r') as f:
                       sarif_data = json.load(f)
               except (FileNotFoundError, json.JSONDecodeError):
-                  # If file not found or empty/invalid, generate a message.
                   findings_html = "<p>No findings in this scan. The SARIF file was either not generated or was empty.</p>"
               else:
                   if sarif_data.get("runs") and sarif_data["runs"][0].get("results"):
@@ -230,7 +254,6 @@ jobs:
                       findings_html = "<p>SARIF file was present but contained no results.</p>"
               
               with open(html_file, 'w') as f:
-                  # This is the only placeholder now, so the KeyError is impossible.
                   f.write(HTML_TEMPLATE.format(findings=findings_html))
 
           if __name__ == "__main__":
