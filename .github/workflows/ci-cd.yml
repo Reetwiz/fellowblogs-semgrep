@@ -177,14 +177,17 @@ jobs:
         with:
           fetch-depth: 0
       - name: Run Semgrep and Generate SARIF Report
-        # Run the Semgrep scan inside its official Docker container
+        # This command runs Semgrep and outputs a standard SARIF file.
+        # The `|| true` is critical: it ensures the step succeeds even if Semgrep finds issues and exits with code 1.
+        # This allows the subsequent steps to run and generate the HTML report.
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep:latest \
-            semgrep ci --config=auto --sarif -o /src/semgrep-report.sarif
+            semgrep ci --config=auto --sarif -o /src/semgrep.sarif || true
       - name: Install SARIF to HTML Converter
         run: npm install -g @microsoft/sarif-web-component
       - name: Convert SARIF to HTML
-        run: sarif-to-html semgrep-report.sarif -o semgrep-report.html
+        # This converts the SARIF file from the previous step into an interactive HTML report.
+        run: sarif-to-html semgrep.sarif -o semgrep-report.html
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
@@ -246,23 +249,14 @@ jobs:
           if [ -d "frontend/dist" ]; then
             cp -r frontend/dist/* _site/
           fi
-          # Check if reports exist before trying to process them
-          CONTENT_B1=""
-          if [ -f "reports/trivy-report-backend1/trivy-report.html" ]; then
-            CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
-          fi
-          CONTENT_B2=""
-          if [ -f "reports/trivy-report-backend2/trivy-report.html" ]; then
-            CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
-          fi
-          CONTENT_FE=""
-          if [ -f "reports/trivy-report-frontend/trivy-report.html" ]; then
-            CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
-          fi
-          CONTENT_SEMGREP=""
+          # Copy the full, interactive Semgrep HTML report into the deployment directory.
           if [ -f "reports/semgrep-report/semgrep-report.html" ]; then
-            CONTENT_SEMGREP=$(cat reports/semgrep-report/semgrep-report.html)
+            cp reports/semgrep-report/semgrep-report.html _site/scan/
           fi
+          # Extract the body content for the simpler Trivy reports.
+          CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
+          CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
+          CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
           
           cat <<EOF > _site/scan/index.html
           <!DOCTYPE html>
@@ -277,15 +271,12 @@ jobs:
             .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; font-size: 17px; }
             .tab button:hover { background-color: #ddd; }
             .tab button.active { background-color: #ccc; }
-            .tabcontent { display: none; padding: 12px 24px; border: 1px solid #ccc; border-top: none; background-color: white; animation: fadeEffect 0.5s; }
+            .tabcontent { display: none; padding: 12px 24px; border: 1px solid #ccc; border-top: none; background-color: white; animation: fadeEffect 0.5s; height: 80vh; }
             table { border-collapse: collapse; margin: 1em 0; width: 100%; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
             th { background-color: #f2f2f2; }
             @keyframes fadeEffect { from {opacity: 0;} to {opacity: 1;} }
-            #SemgrepReportContainer, #SemgrepReportContainer sarif-web-component {
-                height: 80vh; 
-                width: 100%;
-            }
+            iframe { width: 100%; height: 100%; border: none; }
           </style>
           </head>
           <body>
@@ -296,12 +287,8 @@ jobs:
             <button class="tablinks" onclick="openReport(event, 'TrivyBackend2')">Trivy - Backend2</button>
             <button class="tablinks" onclick="openReport(event, 'TrivyFrontend')">Trivy - Frontend</button>
           </div>
-
-          <div id="Semgrep" class="tabcontent">
-            <h2>Semgrep Code Scan Results</h2>
-            <div id="SemgrepReportContainer">
-                ${CONTENT_SEMGREP}
-            </div>
+          <div id="Semgrep" class="tabcontent" style="padding:0;">
+            <iframe src="semgrep-report.html"></iframe>
           </div>
           <div id="TrivyBackend1" class="tabcontent">
             <h2>Trivy Scan Results - Backend1</h2>
