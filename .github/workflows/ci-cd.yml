@@ -160,7 +160,6 @@ jobs:
 
       - name: Setup Node.js
         if: steps.changed_files.outputs.any_changed == 'true'
-        # FIX: Changed v5 to the correct version v4
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -169,7 +168,8 @@ jobs:
         if: steps.changed_files.outputs.any_changed == 'true'
         run: |
           pip install semgrep
-          npm install -g @microsoft/sarif-to-html
+          # FIX: Removed the incorrect "@microsoft/" scope
+          npm install -g sarif-to-html
 
       - name: Scan changed files and Convert Report
         if: steps.changed_files.outputs.any_changed == 'true'
