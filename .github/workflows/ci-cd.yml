@@ -181,9 +181,12 @@ jobs:
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep:latest \
             semgrep ci --config=auto --sarif -o /src/semgrep.sarif || true
-      - name: Generate HTML Report from SARIF
-        # THIS IS THE FIX: Using the correct 'sarif' package and its 'to-html' command.
-        run: npx sarif to-html semgrep.sarif -o semgrep-report.html
+      - name: Convert SARIF to HTML
+        # THIS IS THE FIX: Using a dedicated, reliable action to convert the SARIF file to HTML.
+        uses: anchore/html-generator-action@v2
+        with:
+          source: semgrep.sarif
+          output: semgrep-report.html
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
