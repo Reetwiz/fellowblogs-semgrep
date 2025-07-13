@@ -47,18 +47,20 @@ jobs:
     if: needs.changes.outputs.any_changed == 'true'
     runs-on: ubuntu-latest
     steps:
+      # Fetch the full git history to allow comparison between commits
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Run Semgrep CI
-        # This uses the correct official action with a stable version tag
         uses: semgrep/semgrep-action@v2.5.1
         with:
           publish_token: ${{ secrets.SEMGREP_APP_TOKEN }}
           generate_sarif: true
           output_format: "html"
           output_filename: "semgrep-report.html"
-          baseline_ref: ${{ github.base_ref || 'refs/heads/main' }}
+          # --- CHANGE FOR DIFF-SCAN ON PUSH ---
+          # This tells Semgrep to scan only the changes introduced in the latest push.
+          baseline_ref: ${{ github.event.before }}
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
@@ -210,6 +212,7 @@ jobs:
 
   deploy-to-pages:
     name: 8. Deploy Site and Reports to GitHub Pages
+    # --- CHANGE: ADD SEMGREP JOB AS A DEPENDENCY ---
     needs: [prepare, scan-images, scan-code-semgrep]
     if: needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
@@ -238,9 +241,11 @@ jobs:
           if [ -d "frontend/dist" ]; then
             cp -r frontend/dist/* _site/
           fi
+          # --- CHANGE: ADD LOGIC TO PARSE SEMGREP REPORT ---
           CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
           CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
           CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
+          # This line extracts the body of the Semgrep report
           CONTENT_SEMGREP=$(awk '/<body/,/<\/body>/' reports/semgrep-report/semgrep-report.html | sed '1d;$d')
 
           cat <<EOF > _site/scan/index.html
@@ -265,12 +270,14 @@ jobs:
           </head>
           <body>
           <h1>Consolidated Scan Report for Release ${{ needs.prepare.outputs.tag }}</h1>
+          <!-- --- CHANGE: ADD SEMGREP TAB --- -->
           <div class="tab">
             <button class="tablinks" onclick="openReport(event, 'Semgrep')" id="defaultOpen">Semgrep</button>
             <button class="tablinks" onclick="openReport(event, 'Backend1')">Backend1 (Trivy)</button>
             <button class="tablinks" onclick="openReport(event, 'Backend2')">Backend2 (Trivy)</button>
             <button class="tablinks" onclick="openReport(event, 'Frontend')">Frontend (Trivy)</button>
           </div>
+          <!-- --- CHANGE: ADD SEMGREP CONTENT DIV --- -->
           <div id="Semgrep" class="tabcontent">
             <h2>Semgrep Scan Results</h2>
             ${CONTENT_SEMGREP}
