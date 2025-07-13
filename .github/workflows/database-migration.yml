@@ -1,0 +1,50 @@
+name: Manual Database Migration (All Backends)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - migrate
+          - rollback
+        default: 'migrate'
+
+jobs:
+  run-db-commands:
+    name: Run yarn ${{ github.event.inputs.action }}
+    runs-on: backend-runner
+
+    steps:
+      - name: Execute command on both backend containers via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            ACTION_COMMAND="${{ github.event.inputs.action }}"
+
+            if [ "$ACTION_COMMAND" = "rollback" ]; then
+              echo "Rolling back 'backend2' first"
+              docker exec backend2 yarn rollback
+              echo "'backend2' rollback successful."
+
+              echo "Rolling back 'backend1'"
+              docker exec backend1 yarn rollback
+              echo "'backend1' rollback successful."
+            else
+              echo "Migrating 'backend1' first"
+              docker exec backend1 yarn migrate
+              echo "'backend1' migration successful."
+
+              echo "Migrating 'backend2'"
+              docker exec backend2 yarn migrate
+              echo "'backend2' migration successful. "
+            fi
+
+            echo "The commands completed successfully"

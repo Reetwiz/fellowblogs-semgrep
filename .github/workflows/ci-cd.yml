@@ -1,0 +1,382 @@
+name: CI/CD Pipeline (Production)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend1/**'
+      - 'backend2/**'
+      - 'frontend/**'
+      - 'docker-compose.yml'
+      - '!**.md'
+      - '!**/README.md'
+
+permissions:
+  contents: write
+  packages: write
+  pages: write
+  id-token: write
+  security-events: write # Required for Semgrep to write findings to GitHub Advanced Security
+
+jobs:
+  changes:
+    name: 1. Detect Service Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend1: ${{ steps.filter.outputs.backend1 }}
+      backend2: ${{ steps.filter.outputs.backend2 }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      any_changed: ${{ steps.filter.outputs.backend1 == 'true' || steps.filter.outputs.backend2 == 'true' || steps.filter.outputs.frontend == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend1:
+              - 'backend1/**'
+            backend2:
+              - 'backend2/**'
+            frontend:
+              - 'frontend/**'
+
+  scan-code-semgrep:
+    name: 2. Scan Code with Semgrep
+    needs: changes
+    if: needs.changes.outputs.any_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for accurate diff-aware scanning
+      - name: Run Semgrep CI
+        uses: semgrep/semgrep-action@v2
+        with:
+          publish_token: ${{ secrets.SEMGREP_APP_TOKEN }}
+          generate_sarif: true
+          output_format: "html"
+          output_filename: "semgrep-report.html"
+          baseline_ref: ${{ github.base_ref || 'refs/heads/main' }}
+      - name: Upload Semgrep Scan Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep-report.html
+
+  prepare:
+    name: 3. Prepare Version
+    needs: changes
+    if: needs.changes.outputs.any_changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.changelog.outputs.tag }}
+      version: ${{ steps.changelog.outputs.version }}
+      skipped: ${{ steps.changelog.outputs.skipped }}
+      clean_changelog: ${{ steps.changelog.outputs.clean_changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Conventional Changelog Action
+        id: changelog
+        uses: TriPSs/conventional-changelog-action@v5
+        with:
+          preset: "conventionalcommits"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-push:
+    name: 4. Build & Push - ${{ matrix.service }}
+    needs: [changes, prepare]
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest # Changed from self-hosted
+    environment: production
+    strategy:
+      matrix:
+        service: [backend1, backend2, frontend]
+        # Removed include matrix as runs-on is now the same for all
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}
+          tags: |
+            type=raw,value=latest,enable=true
+            type=semver,pattern=v{{version}},value=${{ needs.prepare.outputs.version }}
+            type=semver,pattern=v{{major}}.{{minor}},value=${{ needs.prepare.outputs.version }}
+      - name: Build and push Docker image (if changed)
+        id: build
+        if: needs.changes.outputs[matrix.service] == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.service }} # Adjusted context path
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            ${{ matrix.service == 'frontend' && format('VITE_CLERK_PUBLISHABLE_KEY={0}', secrets.VITE_CLERK_PUBLISHABLE_KEY) || '' }}
+            ${{ matrix.service == 'frontend' && format('VITE_BACKEND1_BASE_URL={0}', vars.VITE_BACKEND1_BASE_URL) || '' }}
+            ${{ matrix.service == 'frontend' && format('VITE_BACKEND2_BASE_URL={0}', vars.VITE_BACKEND2_BASE_URL) || '' }}
+      - name: Re-tag and push existing image (if not changed)
+        if: needs.changes.outputs[matrix.service] == 'false'
+        run: |
+          PROD_IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}"
+          docker pull $PROD_IMAGE_NAME:latest
+          echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n' | while read tag; do
+            docker tag $PROD_IMAGE_NAME:latest "$tag"
+            docker push "$tag"
+          done
+      - name: Upload Build Artifact (Source Code)
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifact-${{ matrix.service }}
+          path: ./${{ matrix.service }} # Adjusted path
+
+  upload-compose-artifact:
+    name: 5. Upload Compose Artifact for Release
+    needs: prepare
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-compose-file
+          path: docker-compose.yml
+
+  export-images:
+    name: 6. Export Docker Images for Release
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        service: [backend1, backend2, frontend]
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+      - name: Pull and Export Image
+        run: |
+          IMAGE_NAME="${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}"
+          IMAGE_TAG="${{ needs.prepare.outputs.tag }}"
+          docker pull $IMAGE_NAME:$IMAGE_TAG
+          docker save -o image-${{ matrix.service }}.tar $IMAGE_NAME:$IMAGE_TAG
+      - name: Upload Image Export as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-export-${{ matrix.service }}
+          path: image-${{ matrix.service }}.tar
+
+  scan-images:
+    name: 7. Scan Images for Release
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        service: [backend1, backend2, frontend]
+    steps:
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ${{ secrets.DOCKER_HUB_USERNAME }}/fellowblogs-cd-${{ matrix.service }}:${{ needs.prepare.outputs.tag }}
+          format: 'template'
+          template: '@/contrib/html.tpl'
+          output: 'trivy-report.html'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+      - name: Upload Trivy Scan Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ matrix.service }}
+          path: trivy-report.html
+
+  deploy-to-pages:
+    name: 8. Deploy Site and Reports to GitHub Pages
+    needs: [prepare, scan-images, scan-code-semgrep]
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'yarn'
+          cache-dependency-path: frontend/yarn.lock
+      - name: Build Frontend for GitHub Pages
+        run: |
+          cd frontend
+          yarn install --frozen-lockfile
+          VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }} VITE_BASE_URL=/fellowblogs-semgrep/ yarn build
+      - name: Download all scan reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+      - name: Consolidate Artifacts for Pages
+        run: |
+          mkdir -p _site/scan
+          if [ -d "frontend/dist" ]; then
+            cp -r frontend/dist/* _site/
+          fi
+          CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
+          CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
+          CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
+          CONTENT_SEMGREP=$(awk '/<body/,/<\/body>/' reports/semgrep-report/semgrep-report.html | sed '1d;$d')
+
+          cat <<EOF > _site/scan/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+          <title>Consolidated Scan Report</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; margin: 2em; line-height: 1.5; background-color: #f6f8fa; }
+            h1 { border-bottom: 2px solid #eaecef; padding-bottom: 0.3em; }
+            h2 { margin-top: 1.5em; }
+            .tab { overflow: hidden; border: 1px solid #ccc; background-color: #f1f1f1; border-radius: 5px 5px 0 0; }
+            .tab button { background-color: inherit; float: left; border: none; outline: none; cursor: pointer; padding: 14px 16px; transition: 0.3s; font-size: 17px; }
+            .tab button:hover { background-color: #ddd; }
+            .tab button.active { background-color: #ccc; }
+            .tabcontent { display: none; padding: 12px 24px; border: 1px solid #ccc; border-top: none; background-color: white; animation: fadeEffect 0.5s; }
+            table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            @keyframes fadeEffect { from {opacity: 0;} to {opacity: 1;} }
+          </style>
+          </head>
+          <body>
+          <h1>Consolidated Scan Report for Release ${{ needs.prepare.outputs.tag }}</h1>
+          <div class="tab">
+            <button class="tablinks" onclick="openReport(event, 'Semgrep')" id="defaultOpen">Semgrep</button>
+            <button class="tablinks" onclick="openReport(event, 'Backend1')">Backend1 (Trivy)</button>
+            <button class="tablinks" onclick="openReport(event, 'Backend2')">Backend2 (Trivy)</button>
+            <button class="tablinks" onclick="openReport(event, 'Frontend')">Frontend (Trivy)</button>
+          </div>
+          <div id="Semgrep" class="tabcontent">
+            <h2>Semgrep Scan Results</h2>
+            ${CONTENT_SEMGREP}
+          </div>
+          <div id="Backend1" class="tabcontent">
+            <h2>Backend1 Trivy Scan Results</h2>
+            ${CONTENT_B1}
+          </div>
+          <div id="Backend2" class="tabcontent">
+            <h2>Backend2 Trivy Scan Results</h2>
+            ${CONTENT_B2}
+          </div>
+          <div id="Frontend" class="tabcontent">
+            <h2>Frontend Trivy Scan Results</h2>
+            ${CONTENT_FE}
+          </div>
+          <script>
+          function openReport(evt, reportName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tabcontent");
+            for (i = 0; i < tabcontent.length; i++) {
+              tabcontent[i].style.display = "none";
+            }
+            tablinks = document.getElementsByClassName("tablinks");
+            for (i = 0; i < tablinks.length; i++) {
+              tablinks[i].className = tablinks[i].className.replace(" active", "");
+            }
+            document.getElementById(reportName).style.display = "block";
+            evt.currentTarget.className += " active";
+          }
+          document.getElementById("defaultOpen").click();
+          </script>
+          </body>
+          </html>
+          EOF
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy-to-vm:
+    name: 9. Deploy to VM
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest # Changed from self-hosted
+    environment: production
+    steps:
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USERNAME }}
+          key: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd /home/reetwiz/fellowblogs
+            echo "--- Logging into Docker Hub ---"
+            echo "${{ secrets.DOCKER_HUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
+            echo "--- Shutting down existing services ---"
+            docker compose down
+            echo "--- Pulling latest images from Docker Hub ---"
+            docker compose pull
+            echo "--- Restarting services with new images ---"
+            docker compose up -d --remove-orphans
+            echo "--- Cleaning up old, unused Docker images ---"
+            docker image prune -af
+            echo "--- Deployment successful ---"
+
+  release:
+    name: 10. Create GitHub Release
+    needs: [prepare, deploy-to-vm, export-images, upload-compose-artifact, scan-images, scan-code-semgrep, build-and-push]
+    if: needs.prepare.outputs.skipped == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts for release
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Archive source code artifacts
+        run: |
+          cd release-artifacts
+          for dir in build-artifact-*; do
+            zip -r "${dir}.zip" "$dir"
+            rm -rf "$dir"
+          done
+      - name: Rename reports for unique asset names
+        run: |
+          cd release-artifacts
+          for dir in trivy-report-*; do
+            service_name=$(echo "$dir" | sed 's/trivy-report-//')
+            mv "${dir}/trivy-report.html" "${dir}/trivy-report-${service_name}.html"
+          done
+          mv release-artifacts/semgrep-report/semgrep-report.html release-artifacts/semgrep-report/semgrep-report.html
+      - name: Create GitHub Release and Upload Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Release ${{ needs.prepare.outputs.tag }}
+          body: ${{ needs.prepare.outputs.clean_changelog }}
+          files: |
+            release-artifacts/docker-compose-file/docker-compose.yml
+            release-artifacts/build-artifact-*.zip
+            release-artifacts/trivy-report-*/*.html
+            release-artifacts/semgrep-report/semgrep-report.html
+            release-artifacts/docker-image-export-*/*.tar

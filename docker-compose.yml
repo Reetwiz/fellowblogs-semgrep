@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgresdb
+    env_file: ./db.env
+    restart: always
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app-net
+
+  backend1:
+    image: reetwiz/fellowblogcicd-backend1:latest
+    container_name: backend1
+    env_file: ./backend1/.env
+    restart: always
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    networks:
+      - app-net
+
+  backend2:
+    image: reetwiz/fellowblogcicd-backend2:latest
+    container_name: backend2
+    env_file: ./backend2/.env
+    restart: always
+    depends_on:
+      - postgres
+    ports:
+      - "3001:3001"
+    networks:
+      - app-net
+
+  frontend:
+    image: reetwiz/fellowblogcicd-frontend:latest
+    container_name: frontend
+    restart: always
+    depends_on:
+      - backend1
+      - backend2
+    ports:
+      - "80:80"
+    networks:
+      - app-net
+
+volumes:
+  db_data:
+
+networks:
+  app-net:
+    driver: bridge
