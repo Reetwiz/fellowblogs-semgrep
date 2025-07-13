@@ -1,3 +1,11 @@
+## [3.0.2](https://github.com/Reetwiz/fellowblogs-semgrep/compare/v3.0.1...v3.0.2) (2025-07-13)
+
+
+### Bug Fixes
+
+* semgrep setup ([59e548f](https://github.com/Reetwiz/fellowblogs-semgrep/commit/59e548f0ceb81a2d9ac322968d00a1b4d6ee0faf))
+* semgrep setup ([8cd241a](https://github.com/Reetwiz/fellowblogs-semgrep/commit/8cd241a4c277cb205afc0b3e9b4d2aa78ac195e8))
+
 ## [3.0.1](https://github.com/Reetwiz/fellowblogs-semgrep/compare/v3.0.0...v3.0.1) (2025-07-13)
 
 
