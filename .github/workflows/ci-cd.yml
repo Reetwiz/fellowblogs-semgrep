@@ -172,18 +172,20 @@ jobs:
     needs: changes
     if: needs.changes.outputs.any_changed == 'true'
     runs-on: ubuntu-latest
+    container:
+      # Use the official Semgrep container image, bypassing the deprecated action
+      image: returntocorp/semgrep:v1
     steps:
       - uses: actions/checkout@v4
         with:
           # Fetches the entire history, required for Semgrep's diff-aware scanning.
           fetch-depth: 0
-      - name: Run Semgrep CI
-        uses: semgrep/semgrep-action@v2
-        with:
-          # The action automatically performs a diff-aware scan on push events (comparing HEAD~1..HEAD)
-          # and generates an HTML report for publishing.
-          output_format: "html"
-          output_filename: "semgrep-report.html"
+      - name: Run Semgrep Diff-Aware Scan
+        run: |
+          # semgrep ci automatically detects the base branch in GitHub Actions
+          # and runs a diff-aware scan. We use --config=auto to let Semgrep
+          # select relevant rules, and output to an HTML file.
+          semgrep ci --config=auto --html --output=semgrep-report.html
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
