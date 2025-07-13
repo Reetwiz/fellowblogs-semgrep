@@ -24,7 +24,7 @@ const corsOptions = {
     'http://192.168.226.128:8080', 
     // 'https://your-production-domain.com'
   ],
-  credentials: true, // Uncomment if you use cookies/auth
+  credentials: true, // Uncomment if you u. cookies/auth
 };
 
 

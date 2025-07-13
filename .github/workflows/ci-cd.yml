@@ -139,6 +139,7 @@ jobs:
         with:
           # Fetch all history so we can diff against the base commit
           fetch-depth: 0
+
       - name: Get list of changed files
         id: changed_files
         uses: tj-actions/changed-files@v44
@@ -148,25 +149,38 @@ jobs:
             backend1/**
             backend2/**
             frontend/**
-      - name: Setup environment and run scan if files changed
+
+      - name: Check for changed files
+        if: steps.changed_files.outputs.any_changed != 'true'
+        run: echo "No relevant files changed. Skipping SAST scan."
+
+      - name: Setup Python
+        if: steps.changed_files.outputs.any_changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Setup Node.js
+        if: steps.changed_files.outputs.any_changed == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Install Scan Tools
         if: steps.changed_files.outputs.any_changed == 'true'
         run: |
-          echo "--- Setting up Python and Node.js ---"
-          # setup-python and setup-node actions are not needed in a run block
-          # The runner image already has them. We'll install tools directly.
           pip install semgrep
-
-          echo "--- Installing SARIF to HTML converter ---"
           npm install -g @microsoft/sarif-to-html
 
+      - name: Scan changed files and Convert Report
+        if: steps.changed_files.outputs.any_changed == 'true'
+        run: |
           echo "--- Scanning changed files with Semgrep ---"
-          # Pass the list of changed files to Semgrep for an incremental scan
-          # Use `|| true` to ensure the workflow continues even if vulnerabilities are found,
-          # allowing the report to be generated and uploaded.
           semgrep scan --config "p/ci" --sarif -o semgrep.sarif ${{ steps.changed_files.outputs.all_changed_files }} || true
 
           echo "--- Converting SARIF to HTML report ---"
           sarif-to-html -i semgrep.sarif -o semgrep-report.html
+
       - name: Upload HTML Report as Artifact
         if: steps.changed_files.outputs.any_changed == 'true'
         uses: actions/upload-artifact@v4
@@ -201,7 +215,6 @@ jobs:
 
   deploy-to-pages:
     name: 6. Deploy Site and Reports to GitHub Pages
-    # Depends on both Trivy and Semgrep scans for main branch releases
     needs: [changes, prepare, scan-images, sast-semgrep]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
@@ -231,14 +244,12 @@ jobs:
             cp -r frontend/dist/* _site/
           fi
           
-          # Check for and move Semgrep report, creating an empty placeholder if it doesn't exist
           SEMGREP_CONTENT="<h2>Semgrep SAST Scan Results</h2><p>No report available. The scan may have been skipped if no relevant files were changed in this push.</p>"
           if [ -f "reports/semgrep-report-html/semgrep-report.html" ]; then
             cp reports/semgrep-report-html/semgrep-report.html _site/scan/semgrep.html
             SEMGREP_CONTENT="<h2>Semgrep SAST Scan Results</h2><iframe src='semgrep.html' style='width:100%; height:80vh; border:none;'></iframe>"
           fi
 
-          # Extract Trivy report bodies
           CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html 2>/dev/null | sed '1d;$d' || echo "<p>Report not available.</p>")
           CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html 2>/dev/null | sed '1d;$d' || echo "<p>Report not available.</p>")
           CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html 2>/dev/null | sed '1d;$d' || echo "<p>Report not available.</p>")
@@ -312,7 +323,6 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
   
-  # The remaining jobs are re-numbered
   upload-compose-artifact:
     name: 7. Upload Compose Artifact for Release
     needs: prepare
