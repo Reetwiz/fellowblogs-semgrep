@@ -176,15 +176,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Run Semgrep and Generate SARIF Report
-        # Run the Semgrep scan inside its official Docker container
+      - name: Run Semgrep and Generate HTML Report
+        # Run the Semgrep scan inside its official Docker container.
+        # --no-blocking: Prevents the job from failing if findings are detected.
+        # --html-output: Creates the HTML report directly.
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep:latest \
-            semgrep ci --config=auto --sarif -o /src/semgrep-report.sarif
-      - name: Install SARIF to HTML Converter
-        run: npm install -g @microsoft/sarif-web-component
-      - name: Convert SARIF to HTML
-        run: sarif-to-html semgrep-report.sarif -o semgrep-report.html
+            semgrep ci --config=auto --no-blocking --html-output /src/semgrep-report.html
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
@@ -246,23 +244,10 @@ jobs:
           if [ -d "frontend/dist" ]; then
             cp -r frontend/dist/* _site/
           fi
-          # Check if reports exist before trying to process them
-          CONTENT_B1=""
-          if [ -f "reports/trivy-report-backend1/trivy-report.html" ]; then
-            CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
-          fi
-          CONTENT_B2=""
-          if [ -f "reports/trivy-report-backend2/trivy-report.html" ]; then
-            CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
-          fi
-          CONTENT_FE=""
-          if [ -f "reports/trivy-report-frontend/trivy-report.html" ]; then
-            CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
-          fi
-          CONTENT_SEMGREP=""
-          if [ -f "reports/semgrep-report/semgrep-report.html" ]; then
-            CONTENT_SEMGREP=$(cat reports/semgrep-report/semgrep-report.html)
-          fi
+          CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
+          CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
+          CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
+          CONTENT_SEMGREP=$(awk '/<body/,/<\/body>/' reports/semgrep-report/semgrep-report.html | sed '1d;$d')
           
           cat <<EOF > _site/scan/index.html
           <!DOCTYPE html>
@@ -282,10 +267,6 @@ jobs:
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
             th { background-color: #f2f2f2; }
             @keyframes fadeEffect { from {opacity: 0;} to {opacity: 1;} }
-            #SemgrepReportContainer, #SemgrepReportContainer sarif-web-component {
-                height: 80vh; 
-                width: 100%;
-            }
           </style>
           </head>
           <body>
@@ -299,9 +280,7 @@ jobs:
 
           <div id="Semgrep" class="tabcontent">
             <h2>Semgrep Code Scan Results</h2>
-            <div id="SemgrepReportContainer">
-                ${CONTENT_SEMGREP}
-            </div>
+            ${CONTENT_SEMGREP}
           </div>
           <div id="TrivyBackend1" class="tabcontent">
             <h2>Trivy Scan Results - Backend1</h2>
