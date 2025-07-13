@@ -184,7 +184,7 @@ jobs:
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep:latest \
             semgrep ci --json -o /src/semgrep.json --config=auto || true
       - name: Convert JSON to HTML
-        # THIS IS THE FIX: Added `|| true` to prevent this step from failing the job when it finds issues.
+        # `|| true` ensures this step also succeeds even if the converter finds issues.
         run: prospector-html --input semgrep.json --output semgrep-report.html --filter semgrep || true
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
