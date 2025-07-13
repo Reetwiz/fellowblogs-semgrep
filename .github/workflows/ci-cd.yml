@@ -17,7 +17,7 @@ permissions:
   packages: write
   pages: write
   id-token: write
-  security-events: write # Required for Semgrep to write findings to GitHub Advanced Security
+  security-events: write
 
 jobs:
   changes:
@@ -42,25 +42,33 @@ jobs:
               - 'frontend/**'
 
   scan-code-semgrep:
-    name: 2. Scan Code with Semgrep
+    name: 2. Scan Changed Code with Semgrep
     needs: changes
     if: needs.changes.outputs.any_changed == 'true'
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
     steps:
-      # Fetch the full git history to allow comparison between commits
+      # Fetch the full git history to allow comparison between the current and previous commits.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Run Semgrep CI
-        uses: semgrep/semgrep-action@v2.5.1
-        with:
-          publish_token: ${{ secrets.SEMGREP_APP_TOKEN }}
-          generate_sarif: true
-          output_format: "html"
-          output_filename: "semgrep-report.html"
-          # --- CHANGE FOR DIFF-SCAN ON PUSH ---
-          # This tells Semgrep to scan only the changes introduced in the latest push.
-          baseline_ref: ${{ github.event.before }}
+      # --- CHANGE: Use `run` instead of the action ---
+      - name: Run diff-aware scan and generate report
+        run: |
+          # This command performs a diff-aware scan against the commit before the push
+          # and generates the required HTML report.
+          # We use `semgrep scan` here as it's ideal for generating local reports.
+          # The SEMGREP_APP_TOKEN in the environment will be used by `semgrep ci` to publish.
+          
+          # Run the standard CI command to publish to Semgrep App.
+          # It automatically becomes diff-aware on push when SEMGREP_BASELINE_REF is set.
+          SEMGREP_BASELINE_REF=${{ github.event.before }} semgrep ci
+          
+          # Separately, generate the HTML report for the same diff.
+          semgrep scan --baseline-ref ${{ github.event.before }} --config "p/default" --output semgrep-report.html --html
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
         with:
@@ -212,7 +220,6 @@ jobs:
 
   deploy-to-pages:
     name: 8. Deploy Site and Reports to GitHub Pages
-    # --- CHANGE: ADD SEMGREP JOB AS A DEPENDENCY ---
     needs: [prepare, scan-images, scan-code-semgrep]
     if: needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
@@ -241,11 +248,9 @@ jobs:
           if [ -d "frontend/dist" ]; then
             cp -r frontend/dist/* _site/
           fi
-          # --- CHANGE: ADD LOGIC TO PARSE SEMGREP REPORT ---
           CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
           CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
           CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
-          # This line extracts the body of the Semgrep report
           CONTENT_SEMGREP=$(awk '/<body/,/<\/body>/' reports/semgrep-report/semgrep-report.html | sed '1d;$d')
 
           cat <<EOF > _site/scan/index.html
@@ -270,14 +275,12 @@ jobs:
           </head>
           <body>
           <h1>Consolidated Scan Report for Release ${{ needs.prepare.outputs.tag }}</h1>
-          <!-- --- CHANGE: ADD SEMGREP TAB --- -->
           <div class="tab">
             <button class="tablinks" onclick="openReport(event, 'Semgrep')" id="defaultOpen">Semgrep</button>
             <button class="tablinks" onclick="openReport(event, 'Backend1')">Backend1 (Trivy)</button>
             <button class="tablinks" onclick="openReport(event, 'Backend2')">Backend2 (Trivy)</button>
             <button class="tablinks" onclick="openReport(event, 'Frontend')">Frontend (Trivy)</button>
           </div>
-          <!-- --- CHANGE: ADD SEMGREP CONTENT DIV --- -->
           <div id="Semgrep" class="tabcontent">
             <h2>Semgrep Scan Results</h2>
             ${CONTENT_SEMGREP}
