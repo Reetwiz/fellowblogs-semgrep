@@ -179,12 +179,10 @@ jobs:
       - name: Install Report Converter
         run: pip3 install prospector2html
       - name: Run Semgrep and Generate JSON Report
-        # `|| true` ensures this step succeeds even if Semgrep finds issues.
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep:latest \
             semgrep ci --json -o /src/semgrep.json --config=auto || true
       - name: Convert JSON to HTML
-        # `|| true` ensures this step also succeeds even if the converter finds issues.
         run: prospector-html --input semgrep.json --output semgrep-report.html --filter semgrep || true
       - name: Upload Semgrep Scan Report
         uses: actions/upload-artifact@v4
@@ -217,14 +215,12 @@ jobs:
           name: trivy-report-${{ matrix.service }}
           path: trivy-report.html
 
-  deploy-to-pages:
-    name: 8. Deploy Site and Reports to GitHub Pages
-    needs: [changes, prepare, scan-images-trivy, scan-code-semgrep]
+  # --- CHANGE: This job now ONLY builds and uploads the Pages artifact ---
+  build-pages:
+    name: 8. Build Site and Reports for Pages
+    needs: [prepare, scan-images-trivy, scan-code-semgrep]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -247,11 +243,9 @@ jobs:
           if [ -d "frontend/dist" ]; then
             cp -r frontend/dist/* _site/
           fi
-          # Copy the full, interactive Semgrep HTML report into the deployment directory.
           if [ -f "reports/semgrep-report/semgrep-report.html" ]; then
             cp reports/semgrep-report/semgrep-report.html _site/scan/
           fi
-          # Extract the body content for the simpler Trivy reports.
           CONTENT_B1=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend1/trivy-report.html | sed '1d;$d')
           CONTENT_B2=$(awk '/<body/,/<\/body>/' reports/trivy-report-backend2/trivy-report.html | sed '1d;$d')
           CONTENT_FE=$(awk '/<body/,/<\/body>/' reports/trivy-report-frontend/trivy-report.html | sed '1d;$d')
@@ -322,6 +316,20 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./_site
+
+  # --- CHANGE: This new job ONLY deploys the artifact created above ---
+  deploy-pages:
+    name: 8.5 Deploy Site to GitHub Pages
+    needs: build-pages
+    if: github.ref_name == 'main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
@@ -356,7 +364,8 @@ jobs:
 
   release:
     name: 10. Create GitHub Release
-    needs: [prepare, deploy-to-vm, export-images, upload-compose-artifact, scan-images-trivy, scan-code-semgrep, build-and-push]
+    # --- CHANGE: Update the `needs` to depend on the new deploy-pages job ---
+    needs: [prepare, deploy-to-vm, export-images, upload-compose-artifact, scan-images-trivy, scan-code-semgrep, build-and-push, deploy-pages]
     if: github.ref_name == 'main' && needs.prepare.outputs.skipped == 'false'
     runs-on: ubuntu-latest
     permissions:
